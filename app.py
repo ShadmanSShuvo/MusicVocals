@@ -10,6 +10,7 @@ Usage:
 """
 
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -17,8 +18,14 @@ from pathlib import Path
 import numpy as np
 import streamlit as st
 
+# Ensure standard binary locations (e.g. /opt/homebrew/bin for ffmpeg) are in PATH
+for p in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/bin", "/bin"]:
+    if p not in os.environ.get("PATH", "") and os.path.exists(p):
+        os.environ["PATH"] = f"{p}:{os.environ.get('PATH', '')}"
+
 # Ensure src package is importable
 sys.path.insert(0, str(Path(__file__).parent))
+
 
 from src.audio import (
     AudioInfo,

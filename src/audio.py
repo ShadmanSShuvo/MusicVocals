@@ -158,6 +158,91 @@ def validate_audio_duration(
 # FFmpeg / FFprobe Helpers
 # ---------------------------------------------------------------------------
 
+def _ensure_path_env() -> None:
+    """Ensure standard binary paths are in PATH environment variable."""
+    standard_paths = [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ]
+    current_path = os.environ.get("PATH", "")
+    paths_to_add = [p for p in standard_paths if p not in current_path and os.path.exists(p)]
+    if paths_to_add:
+        os.environ["PATH"] = ":".join(paths_to_add) + ":" + current_path
+
+
+_ensure_path_env()
+
+
+def get_ffmpeg_path() -> str:
+    """
+    Locate the ffmpeg binary on the system.
+
+    Checks PATH as well as standard macOS Homebrew and Linux locations.
+
+    Returns:
+        Absolute path to ffmpeg or 'ffmpeg' if in PATH.
+
+    Raises:
+        AudioValidationError: If ffmpeg cannot be found anywhere.
+    """
+    import shutil
+
+    # Try standard PATH lookup
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+
+    # Fallback to known absolute paths
+    candidates = [
+        "/opt/homebrew/bin/ffmpeg",  # Apple Silicon macOS Homebrew
+        "/usr/local/bin/ffmpeg",     # Intel macOS Homebrew / Linux
+        "/usr/bin/ffmpeg",           # Standard Linux
+        "/bin/ffmpeg",
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
+    raise AudioValidationError(
+        "FFmpeg is not installed or not found on this system. "
+        "Please install FFmpeg to process M4A, MP3, and other compressed audio formats:\n"
+        "- macOS: brew install ffmpeg\n"
+        "- Ubuntu/Debian: sudo apt update && sudo apt install ffmpeg\n"
+        "- Fedora: sudo dnf install ffmpeg"
+    )
+
+
+def get_ffprobe_path() -> str:
+    """
+    Locate the ffprobe binary on the system.
+
+    Returns:
+        Absolute path to ffprobe or 'ffprobe'.
+    """
+    import shutil
+
+    found = shutil.which("ffprobe")
+    if found:
+        return found
+
+    candidates = [
+        "/opt/homebrew/bin/ffprobe",
+        "/usr/local/bin/ffprobe",
+        "/usr/bin/ffprobe",
+        "/bin/ffprobe",
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
+    return "ffprobe"
+
+
 def _ffprobe_info(file_path: str | Path) -> dict | None:
     """
     Extract audio metadata using ffprobe (part of FFmpeg).
@@ -172,9 +257,10 @@ def _ffprobe_info(file_path: str | Path) -> dict | None:
         Dict with keys 'duration', 'sample_rate', 'channels', or None if ffprobe fails.
     """
     try:
+        ffprobe_bin = get_ffprobe_path()
         result = subprocess.run(
             [
-                "ffprobe",
+                ffprobe_bin,
                 "-v", "quiet",
                 "-print_format", "json",
                 "-show_format",
@@ -247,9 +333,10 @@ def _convert_to_wav(file_path: str | Path, output_dir: Path | None = None) -> Pa
         return file_path
 
     try:
-        logger.info(f"Converting {file_path.suffix} to WAV via FFmpeg: {file_path.name}")
+        ffmpeg_bin = get_ffmpeg_path()
+        logger.info(f"Converting {file_path.suffix} to WAV via FFmpeg ({ffmpeg_bin}): {file_path.name}")
         cmd = [
-            "ffmpeg",
+            ffmpeg_bin,
             "-y",
             "-i", str(file_path),
             "-vn",
@@ -259,10 +346,12 @@ def _convert_to_wav(file_path: str | Path, output_dir: Path | None = None) -> Pa
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if res.returncode != 0:
             raise RuntimeError(f"FFmpeg error: {res.stderr}")
-        
+
         logger.info(f"Conversion complete: {wav_path.name}")
         return wav_path
 
+    except AudioValidationError:
+        raise
     except Exception as e:
         raise AudioValidationError(
             f"Failed to convert {file_path.suffix} to WAV: {e}. "
