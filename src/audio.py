@@ -10,7 +10,10 @@ Handles all audio I/O operations including:
 """
 
 import io
+import json
+import logging
 import os
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +22,12 @@ from typing import BinaryIO
 import librosa
 import numpy as np
 import soundfile as sf
+
+logger = logging.getLogger(__name__)
+
+# Formats that libsndfile (soundfile) can handle natively
+_SOUNDFILE_FORMATS: set[str] = {".wav", ".flac", ".ogg", ".aiff", ".aif"}
+
 
 from src.utils import (
     DEFAULT_SAMPLE_RATE,
@@ -146,6 +155,128 @@ def validate_audio_duration(
 
 
 # ---------------------------------------------------------------------------
+# FFmpeg / FFprobe Helpers
+# ---------------------------------------------------------------------------
+
+def _ffprobe_info(file_path: str | Path) -> dict | None:
+    """
+    Extract audio metadata using ffprobe (part of FFmpeg).
+
+    This handles ALL formats that FFmpeg supports, including M4A, AAC,
+    MP3, OGG, WMA, etc. — formats that libsndfile cannot read.
+
+    Args:
+        file_path: Path to the audio file.
+
+    Returns:
+        Dict with keys 'duration', 'sample_rate', 'channels', or None if ffprobe fails.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "quiet",
+                "-print_format", "json",
+                "-show_format",
+                "-show_streams",
+                str(file_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+
+        data = json.loads(result.stdout)
+
+        # Find the audio stream
+        audio_stream = None
+        for stream in data.get("streams", []):
+            if stream.get("codec_type") == "audio":
+                audio_stream = stream
+                break
+
+        if audio_stream is None:
+            return None
+
+        duration = float(data.get("format", {}).get("duration", 0))
+        if duration == 0:
+            duration = float(audio_stream.get("duration", 0))
+
+        sample_rate = int(audio_stream.get("sample_rate", 44100))
+        channels = int(audio_stream.get("channels", 2))
+
+        return {
+            "duration": duration,
+            "sample_rate": sample_rate,
+            "channels": channels,
+        }
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
+        logger.debug(f"ffprobe failed for {file_path}: {e}")
+        return None
+
+
+def _convert_to_wav(file_path: str | Path, output_dir: Path | None = None) -> Path:
+    """
+    Convert any audio file to WAV format using direct ffmpeg CLI.
+
+    This is necessary for formats like M4A/AAC/MP3 that libsndfile cannot read,
+    and directly uses ffmpeg to avoid Python 3.13+ audioop standard library removal issues.
+    The conversion produces a 16-bit PCM WAV that all Python audio libraries
+    can handle natively.
+
+    Args:
+        file_path: Path to the source audio file.
+        output_dir: Directory for the output WAV. Uses same dir as input if None.
+
+    Returns:
+        Path to the converted WAV file.
+
+    Raises:
+        AudioValidationError: If conversion fails.
+    """
+    file_path = Path(file_path)
+    if output_dir is None:
+        output_dir = file_path.parent
+
+    wav_path = output_dir / (file_path.stem + ".wav")
+
+    # Skip if already WAV
+    if file_path.suffix.lower() == ".wav" and file_path == wav_path:
+        return file_path
+
+    try:
+        logger.info(f"Converting {file_path.suffix} to WAV via FFmpeg: {file_path.name}")
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", str(file_path),
+            "-vn",
+            "-acodec", "pcm_s16le",
+            str(wav_path),
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if res.returncode != 0:
+            raise RuntimeError(f"FFmpeg error: {res.stderr}")
+        
+        logger.info(f"Conversion complete: {wav_path.name}")
+        return wav_path
+
+    except Exception as e:
+        raise AudioValidationError(
+            f"Failed to convert {file_path.suffix} to WAV: {e}. "
+            "Ensure FFmpeg is installed: brew install ffmpeg (macOS) "
+            "or sudo apt install ffmpeg (Linux)."
+        ) from e
+
+
+def _needs_conversion(file_path: str | Path) -> bool:
+    """Check if a file needs conversion to WAV before processing."""
+    return Path(file_path).suffix.lower() not in _SOUNDFILE_FORMATS
+
+
+# ---------------------------------------------------------------------------
 # File I/O Helpers
 # ---------------------------------------------------------------------------
 
@@ -180,9 +311,10 @@ def load_audio(
     """
     Load an audio file and optionally resample it.
 
-    Uses librosa for robust format handling (leveraging FFmpeg backend
-    for MP3, M4A, etc.). Returns audio as a float32 numpy array
-    normalized to [-1.0, 1.0].
+    For formats not supported by libsndfile (M4A, AAC, MP3, WMA),
+    the file is first converted to WAV using pydub/FFmpeg.
+
+    Returns audio as a float32 numpy array normalized to [-1.0, 1.0].
 
     Args:
         file_path: Path to the audio file.
@@ -202,9 +334,23 @@ def load_audio(
     if not file_path.exists():
         raise AudioValidationError(f"Audio file not found: {file_path}")
 
+    load_path = file_path
+
+    # Convert non-WAV/FLAC formats to WAV first
+    if _needs_conversion(file_path):
+        try:
+            load_path = _convert_to_wav(file_path)
+        except AudioValidationError:
+            raise
+        except Exception as e:
+            raise AudioValidationError(
+                f"Failed to convert {file_path.suffix} audio: {e}. "
+                "Ensure FFmpeg is installed for MP3/M4A support."
+            ) from e
+
     try:
         audio, sr = librosa.load(
-            str(file_path),
+            str(load_path),
             sr=target_sr,
             mono=mono,
         )
@@ -217,9 +363,15 @@ def load_audio(
         ) from e
 
 
+
 def get_audio_info(file_path: str | Path, filename: str | None = None) -> AudioInfo:
     """
     Extract metadata from an audio file without fully decoding it.
+
+    Strategy:
+    1. For WAV/FLAC/OGG: use soundfile (fast, native)
+    2. For M4A/MP3/AAC/WMA: use ffprobe (handles all FFmpeg formats)
+    3. Final fallback: convert to WAV via pydub, then read with soundfile
 
     Args:
         file_path: Path to the audio file.
@@ -235,8 +387,8 @@ def get_audio_info(file_path: str | Path, filename: str | None = None) -> AudioI
     if filename is None:
         filename = file_path.name
 
-    try:
-        # Use soundfile for WAV/FLAC (fast metadata)
+    # --- Strategy 1: soundfile for natively supported formats ---
+    if not _needs_conversion(file_path):
         try:
             info = sf.info(str(file_path))
             return AudioInfo(
@@ -250,24 +402,35 @@ def get_audio_info(file_path: str | Path, filename: str | None = None) -> AudioI
         except Exception:
             pass
 
-        # Fallback: use librosa (handles MP3, M4A via FFmpeg)
-        duration = librosa.get_duration(path=str(file_path))
-        # Load a tiny portion to get sample rate and channels
-        y, sr = librosa.load(str(file_path), sr=None, mono=False, duration=0.1)
-        channels = 1 if y.ndim == 1 else y.shape[0]
-        num_samples = int(duration * sr)
-
+    # --- Strategy 2: ffprobe for M4A/MP3/AAC and other FFmpeg formats ---
+    probe = _ffprobe_info(file_path)
+    if probe is not None and probe["duration"] > 0:
         return AudioInfo(
             filename=filename,
-            duration=duration,
-            sample_rate=sr,
-            channels=channels,
+            duration=probe["duration"],
+            sample_rate=probe["sample_rate"],
+            channels=probe["channels"],
             file_size_bytes=file_path.stat().st_size,
-            num_samples=num_samples,
+            num_samples=int(probe["duration"] * probe["sample_rate"]),
+        )
+
+    # --- Strategy 3: convert to WAV and read with soundfile ---
+    try:
+        wav_path = _convert_to_wav(file_path)
+        info = sf.info(str(wav_path))
+        return AudioInfo(
+            filename=filename,
+            duration=info.duration,
+            sample_rate=info.samplerate,
+            channels=info.channels,
+            file_size_bytes=file_path.stat().st_size,  # Report original file size
+            num_samples=info.frames,
         )
     except Exception as e:
         raise AudioValidationError(
-            f"Could not read audio metadata: {e}"
+            f"Could not read audio metadata from '{filename}': {e}. "
+            f"The file format ({file_path.suffix}) may not be supported, "
+            "or FFmpeg may not be installed."
         ) from e
 
 
