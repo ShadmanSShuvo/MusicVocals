@@ -94,11 +94,11 @@ def plot_waveform(
     fig, ax = plt.subplots(figsize=figsize)
     _apply_dark_theme(fig, ax)
 
-    # Downsample for display if signal is very long (>500k samples)
-    # This prevents matplotlib from becoming slow with millions of points
-    max_display_points = 500_000
+    # Downsample for display if signal is long
+    # This keeps matplotlib rendering snappy and responsive
+    max_display_points = 50_000
     if len(signal_mono) > max_display_points:
-        step = len(signal_mono) // max_display_points
+        step = max(1, len(signal_mono) // max_display_points)
         time = time[::step]
         signal_mono = signal_mono[::step]
 

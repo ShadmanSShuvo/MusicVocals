@@ -66,13 +66,23 @@ class SeparatorBase(ABC):
         ...
 
     @abstractmethod
-    def separate(self, audio: np.ndarray, sample_rate: int) -> dict[str, np.ndarray]:
+    def separate(
+        self,
+        audio: np.ndarray,
+        sample_rate: int,
+        shifts: int = 1,
+        overlap: float = 0.5,
+        instrumental_mode: str = "residual",
+    ) -> dict[str, np.ndarray]:
         """
         Separate an audio signal into component sources.
 
         Args:
             audio: Audio array, shape (channels, samples) or (samples,).
             sample_rate: Sample rate of the audio in Hz.
+            shifts: Number of random shifts for test-time augmentation.
+            overlap: Overlap between consecutive chunks.
+            instrumental_mode: 'residual' or 'additive'.
 
         Returns:
             Dictionary mapping source name to audio array.
@@ -204,27 +214,46 @@ class DemucsSeparator(SeparatorBase):
                 "or a compatibility issue."
             ) from e
 
-    def separate(self, audio: np.ndarray, sample_rate: int) -> dict[str, np.ndarray]:
+    def separate(
+        self,
+        audio: np.ndarray,
+        sample_rate: int,
+        shifts: int = 1,
+        overlap: float = 0.5,
+        instrumental_mode: str = "residual",
+    ) -> dict[str, np.ndarray]:
         """
-        Separate audio into vocals and instrumental tracks.
+        Separate audio into vocals and instrumental tracks with high fidelity.
 
         Pipeline:
         1. Convert numpy array to PyTorch tensor
-        2. Ensure stereo format (Demucs requires stereo)
-        3. Resample to model's native rate if needed
-        4. Run inference with torch.no_grad()
-        5. Extract stems and recombine into vocals + instrumental
-        6. Convert back to numpy arrays
+        2. Ensure stereo format (Demucs requires 2 channels)
+        3. Run inference with test-time shift equivariance (shifts) & cross-fade overlap
+        4. Extract 4 individual stems (vocals, drums, bass, other)
+        5. Compute additive instrumental (drums + bass + other)
+        6. Compute residual instrumental (original mix - vocals) to preserve 100% of
+           subtle acoustic elements, reverbs, and non-vocal nuances.
+        7. Return full dictionary with selected instrumental and all stems.
 
         Args:
             audio: Audio array, shape (samples,) or (channels, samples).
                    Values in [-1.0, 1.0].
             sample_rate: Sample rate of the input audio in Hz.
+            shifts: Number of random shifts for test-time augmentation (0, 1, or 2).
+                    Higher values improve separation quality and reduce artifacts.
+            overlap: Overlap between consecutive chunks (0.25 to 0.75).
+                     0.5 provides smooth cross-fades and prevents dropped beats.
+            instrumental_mode: 'residual' (original - vocals) or 'additive' (drums + bass + other).
 
         Returns:
             Dictionary with:
             - 'vocals': Vocal track, shape (channels, samples)
-            - 'instrumental': Instrumental track, shape (channels, samples)
+            - 'instrumental': Instrumental track according to instrumental_mode
+            - 'instrumental_residual': Lossless residual track (mix - vocals)
+            - 'instrumental_additive': Stem sum track (drums + bass + other)
+            - 'drums': Isolated drum stem
+            - 'bass': Isolated bass stem
+            - 'other': Isolated other instruments stem
         """
         if not self.is_loaded:
             raise RuntimeError("Model not loaded. Call load_model() first.")
@@ -235,8 +264,15 @@ class DemucsSeparator(SeparatorBase):
         # --- Step 2: Ensure stereo ---
         if tensor.dim() == 1:
             tensor = tensor.unsqueeze(0).expand(2, -1)
-        elif tensor.dim() == 2 and tensor.shape[0] == 1:
-            tensor = tensor.expand(2, -1)
+        elif tensor.dim() == 2:
+            if tensor.shape[0] == 1:
+                tensor = tensor.expand(2, -1)
+            elif tensor.shape[0] > 2:
+                # Downmix multi-channel (e.g. 5.1) to stereo
+                tensor = tensor[:2, :]
+
+        # Save stereo reference as numpy for residual computation: shape (2, samples)
+        orig_stereo_np = tensor.cpu().numpy()
 
         # Add batch dimension: (batch, channels, samples)
         tensor = tensor.unsqueeze(0)
@@ -247,12 +283,13 @@ class DemucsSeparator(SeparatorBase):
         # --- Step 4: Run inference ---
         try:
             with torch.no_grad():
-                # Demucs apply_model handles chunking for long audio
                 from demucs.apply import apply_model
 
                 sources = apply_model(
                     self._model,
                     tensor,
+                    shifts=shifts,
+                    overlap=overlap,
                     device=self.device,
                     progress=False,
                 )
@@ -266,12 +303,13 @@ class DemucsSeparator(SeparatorBase):
         except Exception as e:
             raise RuntimeError(f"Source separation failed: {e}") from e
 
-        # --- Step 5: Extract and recombine stems ---
-        # Demucs source order: drums, bass, other, vocals
+        # --- Step 5: Extract stems ---
         source_names = self._get_source_names()
-
-        # Move to CPU and convert to numpy
         sources_np = sources.squeeze(0).cpu().numpy()
+
+        stem_dict: dict[str, np.ndarray] = {}
+        for i, name in enumerate(source_names):
+            stem_dict[name] = sources_np[i]
 
         vocals_idx = source_names.index("vocals") if "vocals" in source_names else -1
         if vocals_idx < 0:
@@ -279,16 +317,41 @@ class DemucsSeparator(SeparatorBase):
 
         vocals = sources_np[vocals_idx]  # shape: (channels, samples)
 
-        # Instrumental = sum of all non-vocal stems
-        instrumental = np.zeros_like(vocals)
+        # 1. Additive instrumental = sum of drums + bass + other
+        instrumental_additive = np.zeros_like(vocals)
         for i, name in enumerate(source_names):
             if name != "vocals":
-                instrumental += sources_np[i]
+                instrumental_additive += sources_np[i]
 
-        return {
+        # 2. Residual instrumental = original mix - vocals
+        # Ensure shapes match exactly
+        min_len = min(orig_stereo_np.shape[-1], vocals.shape[-1])
+        instrumental_residual = orig_stereo_np[:, :min_len] - vocals[:, :min_len]
+
+        # Prevent peak clipping on residual (soft clip / peak limit if > 1.0)
+        max_peak = np.max(np.abs(instrumental_residual))
+        if max_peak > 1.0:
+            instrumental_residual = instrumental_residual / max_peak
+
+        # Choose primary instrumental
+        if instrumental_mode == "residual":
+            primary_instrumental = instrumental_residual
+        else:
+            primary_instrumental = instrumental_additive
+
+        result: dict[str, np.ndarray] = {
             "vocals": vocals,
-            "instrumental": instrumental,
+            "instrumental": primary_instrumental,
+            "instrumental_residual": instrumental_residual,
+            "instrumental_additive": instrumental_additive,
         }
+
+        # Include individual stems if available
+        for name in ["drums", "bass", "other"]:
+            if name in stem_dict:
+                result[name] = stem_dict[name]
+
+        return result
 
     def _numpy_to_tensor(self, audio: np.ndarray) -> torch.Tensor:
         """Convert numpy audio to a float32 PyTorch tensor."""

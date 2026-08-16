@@ -169,11 +169,13 @@ class TestChannelConversion:
         np.testing.assert_array_equal(result[0], mono_signal)
         np.testing.assert_array_equal(result[1], mono_signal)
 
-    def test_stereo_stays_stereo(self, stereo_signal: np.ndarray):
-        """Stereo signal through ensure_stereo should remain unchanged."""
-        result = ensure_stereo(stereo_signal)
+    def test_multichannel_to_stereo(self):
+        """Multi-channel signal (e.g., 6-channel 5.1) should downmix to 2 channels."""
+        surround_signal = np.random.randn(6, 1000).astype(np.float32)
+        result = ensure_stereo(surround_signal)
         assert result.ndim == 2
         assert result.shape[0] == 2
+        assert result.shape[1] == 1000
 
 
 # ---------------------------------------------------------------------------
@@ -219,3 +221,10 @@ class TestSaving:
         data, _ = sf.read(str(out_path))
         assert data.max() <= 1.0
         assert data.min() >= -1.0
+
+    def test_prevent_clipping_helper(self):
+        """prevent_clipping should scale down signals exceeding 1.0."""
+        from src.audio import prevent_clipping
+        overshoot = np.array([2.0, -2.0, 0.5], dtype=np.float32)
+        scaled = prevent_clipping(overshoot)
+        assert np.max(np.abs(scaled)) <= 1.0

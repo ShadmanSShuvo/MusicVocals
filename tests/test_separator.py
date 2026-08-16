@@ -84,9 +84,16 @@ class TestSeparationIntegration:
         right = 0.3 * np.sin(2 * np.pi * 880 * t)
         stereo = np.stack([left, right]).astype(np.float32)
 
-        results = sep.separate(stereo, sr)
+        results = sep.separate(stereo, sr, shifts=0, overlap=0.25, instrumental_mode="residual")
 
         assert "vocals" in results
         assert "instrumental" in results
+        assert "instrumental_residual" in results
+        assert "instrumental_additive" in results
+        assert "drums" in results
+        assert "bass" in results
+        assert "other" in results
         assert results["vocals"].shape[0] == 2  # Stereo output
         assert results["instrumental"].shape[0] == 2
+        assert results["instrumental_residual"].shape[0] == 2
+        assert results["instrumental_additive"].shape[0] == 2

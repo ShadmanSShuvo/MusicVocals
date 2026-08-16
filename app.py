@@ -158,10 +158,51 @@ def get_separator() -> DemucsSeparator:
 # Sidebar
 # ---------------------------------------------------------------------------
 
-def render_sidebar() -> None:
-    """Render the sidebar with app info and settings."""
+def render_sidebar() -> dict[str, Any]:
+    """Render the sidebar with app info and separation quality settings."""
     with st.sidebar:
         st.markdown("## 🎵 Vocal & Music Separator")
+        st.markdown("---")
+
+        st.markdown("### 🎚️ Separation Settings")
+        quality_choice = st.selectbox(
+            "Quality Profile",
+            [
+                "✨ High Quality (Recommended)",
+                "🚀 Ultra Quality (Studio - Slower)",
+                "⚡ Fast (Quick Preview)",
+            ],
+            index=0,
+            help=(
+                "High Quality uses test-time shift augmentation and 50% chunk overlap "
+                "to eliminate dropped beats and boundary artifacts."
+            ),
+        )
+
+        if "Ultra Quality" in quality_choice:
+            shifts = 2
+            overlap = 0.5
+        elif "Fast" in quality_choice:
+            shifts = 0
+            overlap = 0.25
+        else:
+            shifts = 1
+            overlap = 0.5
+
+        default_mode = st.radio(
+            "Default Instrumental Mode",
+            [
+                "Residual (Mix - Vocals) [Recommended]",
+                "Additive (Drums + Bass + Other)",
+            ],
+            index=0,
+            help=(
+                "Residual Mode preserves 100% of instrumental fullness, reverbs, and subtle acoustic elements. "
+                "Additive Mode sums the isolated Demucs stems."
+            ),
+        )
+        mode_str = "residual" if "Residual" in default_mode else "additive"
+
         st.markdown("---")
 
         st.markdown("### 📋 How to Use")
@@ -169,7 +210,7 @@ def render_sidebar() -> None:
         1. **Upload** a song (MP3, WAV, FLAC, M4A)
         2. **Preview** the original audio
         3. **Click** "Separate Vocals & Music"
-        4. **Listen** to separated tracks
+        4. **Listen** to separated tracks & stems
         5. **Download** the results
         """)
 
@@ -205,7 +246,13 @@ def render_sidebar() -> None:
         """)
 
         st.markdown("---")
-        st.caption("Built with Streamlit + PyTorch + Demucs")
+        st.caption("Built with Streamlit + PyTorch + Demucs by Shuvo")
+
+    return {
+        "shifts": shifts,
+        "overlap": overlap,
+        "mode": mode_str,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +262,7 @@ def render_sidebar() -> None:
 def main() -> None:
     """Main Streamlit application."""
 
-    render_sidebar()
+    settings = render_sidebar()
 
     # --- Header ---
     st.markdown("""
@@ -318,10 +365,10 @@ def main() -> None:
                 unsafe_allow_html=True)
 
     # Check if results already exist in session state
-    results_key = f"results_{uploaded_file.name}_{uploaded_file.size}"
+    results_key = f"results_{uploaded_file.name}_{uploaded_file.size}_{settings['shifts']}_{settings['overlap']}"
 
     if results_key in st.session_state:
-        _render_results(st.session_state[results_key], sr)
+        _render_results(st.session_state[results_key], sr, settings)
         return
 
     # Separation button
@@ -334,8 +381,8 @@ def main() -> None:
         )
     with col_info:
         st.caption(
-            "This will load the AI model (first time may download ~80 MB) "
-            "and separate the song into vocal and instrumental tracks."
+            f"Settings: **Shifts={settings['shifts']}**, **Overlap={settings['overlap']}**, "
+            f"Default Instrumental: **{settings['mode'].title()} Mode**."
         )
 
     if not separate_clicked:
@@ -377,13 +424,19 @@ def main() -> None:
 
         # Step 3: Separate
         with status:
-            st.write(f"🧠 Running Demucs on {separator.get_device_name()}...")
-            st.write("This may take a moment...")
+            st.write(f"🧠 Running Demucs on {separator.get_device_name()} (shifts={settings['shifts']}, overlap={settings['overlap']})...")
+            st.write("Extracting high-fidelity vocal and instrumental stems...")
 
         start_time = time.time()
 
         try:
-            stems = separator.separate(audio_stereo, sr_audio)
+            stems = separator.separate(
+                audio_stereo,
+                sr_audio,
+                shifts=settings["shifts"],
+                overlap=settings["overlap"],
+                instrumental_mode=settings["mode"],
+            )
         except RuntimeError as e:
             st.error(f"❌ Separation failed: {e}")
             progress.empty()
@@ -391,20 +444,15 @@ def main() -> None:
             return
 
         elapsed = time.time() - start_time
-        progress.progress(75, text="Separation complete! Generating analysis...")
+        progress.progress(70, text="Separation complete! Generating analysis...")
 
         with status:
             st.write(f"✅ Separation completed in {elapsed:.1f}s")
 
-        # Step 4: Post-process and save
+        # Step 4: Post-process stems
         vocals = stems["vocals"]
-        instrumental = stems["instrumental"]
-
-        # Save output WAVs
-        vocals_path = temp_dir / "vocals.wav"
-        instrumental_path = temp_dir / "instrumental.wav"
-        save_audio(vocals, vocals_path, sample_rate=44100)
-        save_audio(instrumental, instrumental_path, sample_rate=44100)
+        instr_residual = stems["instrumental_residual"]
+        instr_additive = stems["instrumental_additive"]
 
         progress.progress(80, text="Computing DSP analysis...")
 
@@ -413,25 +461,41 @@ def main() -> None:
             st.write("📊 Computing spectral analysis...")
 
         vocals_mono = ensure_mono(vocals)
-        instrumental_mono = ensure_mono(instrumental)
+        instr_res_mono = ensure_mono(instr_residual)
+        instr_add_mono = ensure_mono(instr_additive)
 
         # STFT and spectrograms
         n_fft = 2048
         hop_length = 512
 
         vocals_stft = compute_stft(vocals_mono, 44100, n_fft=n_fft, hop_length=hop_length)
-        instr_stft = compute_stft(instrumental_mono, 44100, n_fft=n_fft, hop_length=hop_length)
+        instr_res_stft = compute_stft(instr_res_mono, 44100, n_fft=n_fft, hop_length=hop_length)
+        instr_add_stft = compute_stft(instr_add_mono, 44100, n_fft=n_fft, hop_length=hop_length)
 
         vocals_spec = compute_log_spectrogram(compute_spectrogram(vocals_stft))
-        instr_spec = compute_log_spectrogram(compute_spectrogram(instr_stft))
+        instr_res_spec = compute_log_spectrogram(compute_spectrogram(instr_res_stft))
+        instr_add_spec = compute_log_spectrogram(compute_spectrogram(instr_add_stft))
 
         # Spectral features
         vocals_features = extract_audio_features(vocals_mono, 44100, n_fft=n_fft, hop_length=hop_length)
-        instr_features = extract_audio_features(instrumental_mono, 44100, n_fft=n_fft, hop_length=hop_length)
+        instr_res_features = extract_audio_features(instr_res_mono, 44100, n_fft=n_fft, hop_length=hop_length)
+        instr_add_features = extract_audio_features(instr_add_mono, 44100, n_fft=n_fft, hop_length=hop_length)
 
         # FFT
         vocals_freqs, vocals_mags = compute_fft(vocals_mono, 44100)
-        instr_freqs, instr_mags = compute_fft(instrumental_mono, 44100)
+        instr_res_freqs, instr_res_mags = compute_fft(instr_res_mono, 44100)
+        instr_add_freqs, instr_add_mags = compute_fft(instr_add_mono, 44100)
+
+        # Build 4-stems dictionary for stem inspection
+        stems_dict_processed = {}
+        for stem_name in ["drums", "bass", "other"]:
+            if stem_name in stems:
+                stem_audio = stems[stem_name]
+                stems_dict_processed[stem_name] = {
+                    "audio": stem_audio,
+                    "mono": ensure_mono(stem_audio),
+                    "bytes": audio_to_bytes(stem_audio),
+                }
 
         progress.progress(100, text="Done!")
 
@@ -442,19 +506,30 @@ def main() -> None:
         # Store results
         results = {
             "vocals": vocals,
-            "instrumental": instrumental,
             "vocals_mono": vocals_mono,
-            "instrumental_mono": instrumental_mono,
+            "vocals_bytes": audio_to_bytes(vocals),
             "vocals_spec": vocals_spec,
-            "instr_spec": instr_spec,
             "vocals_features": vocals_features,
-            "instr_features": instr_features,
             "vocals_freqs": vocals_freqs,
             "vocals_mags": vocals_mags,
-            "instr_freqs": instr_freqs,
-            "instr_mags": instr_mags,
-            "vocals_bytes": audio_to_bytes(vocals),
-            "instr_bytes": audio_to_bytes(instrumental),
+            # Residual Instrumental (Original - Vocals)
+            "instr_residual": instr_residual,
+            "instr_res_mono": instr_res_mono,
+            "instr_res_bytes": audio_to_bytes(instr_residual),
+            "instr_res_spec": instr_res_spec,
+            "instr_res_features": instr_res_features,
+            "instr_res_freqs": instr_res_freqs,
+            "instr_res_mags": instr_res_mags,
+            # Additive Instrumental (Drums + Bass + Other)
+            "instr_additive": instr_additive,
+            "instr_add_mono": instr_add_mono,
+            "instr_add_bytes": audio_to_bytes(instr_additive),
+            "instr_add_spec": instr_add_spec,
+            "instr_add_features": instr_add_features,
+            "instr_add_freqs": instr_add_freqs,
+            "instr_add_mags": instr_add_mags,
+            # Stems
+            "stems": stems_dict_processed,
             "elapsed": elapsed,
             "sr": 44100,
             "n_fft": n_fft,
@@ -468,18 +543,17 @@ def main() -> None:
         logger.exception("Unexpected error during separation")
         return
     finally:
-        # Clean up temp files (but keep results in session state)
         cleanup_temp_dir(temp_dir)
 
     # Render results
-    _render_results(results, sr)
+    _render_results(results, sr, settings)
 
 
 # ---------------------------------------------------------------------------
 # Results Rendering
 # ---------------------------------------------------------------------------
 
-def _render_results(results: dict, sr: int) -> None:
+def _render_results(results: dict, sr: int, settings: dict) -> None:
     """Render the separation results with audio players, visualizations, and downloads."""
 
     hop_length = results["hop_length"]
@@ -489,12 +563,47 @@ def _render_results(results: dict, sr: int) -> None:
 
     st.success(f"✅ Separation completed in {results['elapsed']:.1f} seconds")
 
+    # --- Mode Selection for Instrumental ---
+    st.markdown("#### 🎛️ Instrumental Mode Selection")
+    mode_selection = st.radio(
+        "Choose how the instrumental track is reconstructed:",
+        [
+            "🌟 Residual Mode (Original - Vocals) [Recommended — Full Fidelity & Reverb]",
+            "🥁 Additive Mode (Sum of Demucs Stems: Drums + Bass + Other)",
+        ],
+        index=0 if settings.get("mode") == "residual" else 1,
+        horizontal=True,
+        help=(
+            "Residual Mode subtracts the vocals from the original mix, guaranteeing no missed bits or dropouts. "
+            "Additive Mode combines the isolated drums, bass, and other instruments."
+        ),
+    )
+
+    is_residual = "Residual" in mode_selection
+
+    if is_residual:
+        instr_mono = results["instr_res_mono"]
+        instr_bytes = results["instr_res_bytes"]
+        instr_spec = results["instr_res_spec"]
+        instr_features = results["instr_res_features"]
+        instr_freqs = results["instr_res_freqs"]
+        instr_mags = results["instr_res_mags"]
+        mode_label = "Residual (Mix - Vocals)"
+    else:
+        instr_mono = results["instr_add_mono"]
+        instr_bytes = results["instr_add_bytes"]
+        instr_spec = results["instr_add_spec"]
+        instr_features = results["instr_add_features"]
+        instr_freqs = results["instr_add_freqs"]
+        instr_mags = results["instr_add_mags"]
+        mode_label = "Additive (Drums + Bass + Other)"
+
     # --- Comparison Waveforms ---
     with st.expander("📊 Waveform Comparison", expanded=False):
         fig = plot_comparison_waveforms(
             {
                 "Vocals": results["vocals_mono"],
-                "Instrumental": results["instrumental_mono"],
+                f"Instrumental ({mode_label})": instr_mono,
             },
             results["sr"],
         )
@@ -541,16 +650,16 @@ def _render_results(results: dict, sr: int) -> None:
 
     # --- Instrumental Column ---
     with col_instr:
-        st.markdown("### 🎸 Instrumental")
+        st.markdown(f"### 🎸 Instrumental ({mode_label})")
 
         # Audio player
-        st.audio(results["instr_bytes"], format="audio/wav")
+        st.audio(instr_bytes, format="audio/wav")
 
         # Download button
         st.download_button(
-            label="⬇️ Download Instrumental (WAV)",
-            data=results["instr_bytes"],
-            file_name="instrumental.wav",
+            label=f"⬇️ Download Instrumental — {mode_label} (WAV)",
+            data=instr_bytes,
+            file_name=f"instrumental_{'residual' if is_residual else 'additive'}.wav",
             mime="audio/wav",
             use_container_width=True,
         )
@@ -558,8 +667,8 @@ def _render_results(results: dict, sr: int) -> None:
         # Waveform
         with st.expander("📈 Instrumental Waveform", expanded=True):
             fig = plot_waveform(
-                results["instrumental_mono"], results["sr"],
-                title="Instrumental — Waveform", color="#7EE787",
+                instr_mono, results["sr"],
+                title=f"Instrumental ({mode_label}) — Waveform", color="#7EE787",
             )
             st.pyplot(fig)
             plt_close(fig)
@@ -567,12 +676,47 @@ def _render_results(results: dict, sr: int) -> None:
         # Spectrogram
         with st.expander("🌈 Instrumental Spectrogram", expanded=True):
             fig = plot_spectrogram(
-                results["instr_spec"], results["sr"],
+                instr_spec, results["sr"],
                 hop_length=hop_length,
-                title="Instrumental — Spectrogram",
+                title=f"Instrumental ({mode_label}) — Spectrogram",
             )
             st.pyplot(fig)
             plt_close(fig)
+
+    # --- 4-Stem Explorer Section ---
+    if results.get("stems"):
+        st.markdown('<div class="section-header"><h3>🥁 Isolated 4-Stem Inspector</h3></div>',
+                    unsafe_allow_html=True)
+        st.caption("Inspect and download individual constituent stems separated by Demucs v4:")
+
+        stem_cols = st.columns(3)
+        stem_configs = [
+            ("drums", "🥁 Drums", "#58A6FF"),
+            ("bass", "🎸 Bass", "#BC8CFF"),
+            ("other", "🎹 Other Instruments", "#39D353"),
+        ]
+
+        for idx, (stem_key, stem_title, stem_color) in enumerate(stem_configs):
+            if stem_key in results["stems"]:
+                stem_data = results["stems"][stem_key]
+                with stem_cols[idx]:
+                    st.markdown(f"**{stem_title}**")
+                    st.audio(stem_data["bytes"], format="audio/wav")
+                    st.download_button(
+                        label=f"⬇️ Download {stem_key.capitalize()} (WAV)",
+                        data=stem_data["bytes"],
+                        file_name=f"{stem_key}.wav",
+                        mime="audio/wav",
+                        use_container_width=True,
+                    )
+                    with st.expander(f"{stem_key.capitalize()} Waveform", expanded=False):
+                        fig = plot_waveform(
+                            stem_data["mono"], results["sr"],
+                            title=f"{stem_key.capitalize()} — Waveform",
+                            color=stem_color,
+                        )
+                        st.pyplot(fig)
+                        plt_close(fig)
 
     # --- Advanced Analysis ---
     st.markdown('<div class="section-header"><h3>🔬 Advanced Analysis</h3></div>',
@@ -595,9 +739,9 @@ def _render_results(results: dict, sr: int) -> None:
 
         with col_if:
             fig = plot_audio_features(
-                results["instr_features"], results["sr"],
+                instr_features, results["sr"],
                 hop_length=hop_length,
-                title="Instrumental — Spectral Features",
+                title=f"Instrumental ({mode_label}) — Spectral Features",
             )
             st.pyplot(fig)
             plt_close(fig)
@@ -615,8 +759,8 @@ def _render_results(results: dict, sr: int) -> None:
 
         with col_is:
             fig = plot_frequency_spectrum(
-                results["instr_freqs"], results["instr_mags"],
-                title="Instrumental — Frequency Spectrum",
+                instr_freqs, instr_mags,
+                title=f"Instrumental ({mode_label}) — Frequency Spectrum",
                 color="#7EE787",
             )
             st.pyplot(fig)

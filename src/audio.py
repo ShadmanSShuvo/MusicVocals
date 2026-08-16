@@ -459,23 +459,55 @@ def ensure_mono(audio: np.ndarray) -> np.ndarray:
 
 def ensure_stereo(audio: np.ndarray) -> np.ndarray:
     """
-    Convert audio to stereo by duplicating mono channel.
+    Convert audio to stereo (2 channels).
+
+    Handles:
+    - 1D mono -> duplicates to (2, samples)
+    - 2D (1, samples) -> duplicates to (2, samples)
+    - 2D (2, samples) -> unchanged
+    - 2D (>2, samples) -> downmixes multi-channel (e.g., 5.1 surround) to stereo (2, samples)
 
     Args:
-        audio: Audio array. Shape (samples,) or (2, samples).
+        audio: Audio array.
 
     Returns:
         Stereo audio array with shape (2, samples).
     """
     if audio.ndim == 1:
         return np.stack([audio, audio], axis=0)
-    if audio.ndim == 2 and audio.shape[0] == 2:
-        return audio
-    if audio.ndim == 2 and audio.shape[0] == 1:
-        return np.concatenate([audio, audio], axis=0)
+    if audio.ndim == 2:
+        if audio.shape[0] == 2:
+            return audio
+        if audio.shape[0] == 1:
+            return np.concatenate([audio, audio], axis=0)
+        if audio.shape[0] > 2:
+            # Downmix multi-channel: take first 2 channels (standard stereo L/R)
+            logger.info(f"Downmixing {audio.shape[0]}-channel audio to stereo")
+            return audio[:2, :].copy()
     raise AudioValidationError(
-        f"Unexpected audio shape: {audio.shape}. Expected 1D or (2, samples)."
+        f"Unexpected audio shape: {audio.shape}. Expected 1D or 2D array."
     )
+
+
+def prevent_clipping(audio: np.ndarray, headroom_db: float = 0.1) -> np.ndarray:
+    """
+    Ensure audio signal does not clip past [-1.0, 1.0].
+
+    If the maximum absolute peak exceeds 1.0, scales the entire signal
+    down proportionally to preserve dynamics without distortion.
+
+    Args:
+        audio: Float32 audio array.
+        headroom_db: Safety headroom margin in decibels.
+
+    Returns:
+        Normalized audio array with peak <= 1.0.
+    """
+    max_peak = np.max(np.abs(audio)) if audio.size > 0 else 0.0
+    if max_peak > 1.0:
+        target_max = 10.0 ** (-headroom_db / 20.0)
+        return (audio / max_peak) * target_max
+    return audio
 
 
 # ---------------------------------------------------------------------------
@@ -507,7 +539,8 @@ def save_audio(
     file_path = Path(file_path)
     file_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Clip to prevent distortion
+    # Safely scale down if peaking above 1.0 to prevent harsh distortion
+    audio = prevent_clipping(audio)
     audio = np.clip(audio, -1.0, 1.0)
 
     # Transpose for soundfile: expects (samples, channels)
@@ -541,6 +574,7 @@ def audio_to_bytes(
     Returns:
         WAV file content as bytes.
     """
+    audio = prevent_clipping(audio)
     audio = np.clip(audio, -1.0, 1.0)
     if audio.ndim == 2:
         audio_out = audio.T
