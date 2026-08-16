@@ -1,0 +1,25 @@
+# Vocal & Music Separator — Dependencies
+# Python 3.14+ compatible
+
+# Web framework
+streamlit>=1.45
+
+# Deep learning
+torch>=2.10
+torchaudio>=2.10
+
+# Source separation model
+demucs>=4.0
+
+# Audio processing
+numpy>=2.0
+scipy>=1.14
+librosa>=0.11
+soundfile>=0.13
+pydub>=0.25
+
+# Visualization
+matplotlib>=3.10
+
+# Testing
+pytest>=8.0
