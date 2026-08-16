@@ -2,10 +2,19 @@
 
 **Separate vocals and instrumental tracks from any song using AI-powered source separation and digital signal processing.**
 
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://musicvocals.streamlit.app/)
 ![Python](https://img.shields.io/badge/Python-3.11+-blue)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.45+-FF4B4B)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.10+-EE4C2C)
 ![License](https://img.shields.io/badge/License-MIT-green)
+
+---
+
+## 🌐 Live Demo
+
+Try the interactive web application live on Streamlit Cloud:
+
+👉 **[Launch App: musicvocals.streamlit.app](https://musicvocals.streamlit.app/)**
 
 ---
 
@@ -158,7 +167,7 @@ choco install ffmpeg
 
 ```bash
 # Clone the repository
-git clone <repo-url>
+git clone https://github.com/ShadmanSShuvo/MusicVocals.git
 cd MusicVocals
 
 # Create virtual environment
