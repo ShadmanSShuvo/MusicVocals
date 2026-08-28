@@ -46,6 +46,7 @@ from src.dsp import (
     compute_stft,
     extract_audio_features,
 )
+from src.piano import PianoConversionError, PianoConverter
 from src.separator import DemucsSeparator, select_device
 from src.utils import (
     LARGE_FILE_WARNING_SECONDS,
@@ -162,6 +163,17 @@ def get_separator(model_name: str = "htdemucs") -> DemucsSeparator:
     return separator
 
 
+@st.cache_resource(show_spinner=False)
+def get_piano_converter() -> PianoConverter:
+    """
+    Load and cache the PianoConverter instance.
+
+    Uses Streamlit's @cache_resource so SoundFont discovery and
+    synthesizer initialization are done once.
+    """
+    return PianoConverter()
+
+
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
@@ -275,7 +287,7 @@ def render_sidebar() -> dict[str, Any]:
         """)
 
         st.markdown("---")
-        st.caption("Built with Streamlit + PyTorch + Demucs by Shuvo")
+        st.caption("Built with Streamlit + PyTorch + Demucs + FluidSynth by Shuvo")
 
     return {
         "shifts": shifts,
@@ -769,11 +781,14 @@ def _render_results(results: dict, sr: int, settings: dict) -> None:
                     with st.expander(f"{label} Waveform", expanded=False):
                         fig = plot_waveform(
                             stem_data["mono"], results["sr"],
-                            title=f"{label} — Waveform",
+                            title=f"{stem_key.capitalize()} — Waveform",
                             color=color,
                         )
                         st.pyplot(fig)
                         plt_close(fig)
+
+    # --- Piano Arrangement Section ---
+    _render_piano_section(results, is_residual, mode_label, results["sr"])
 
     # --- Advanced Analysis ---
     st.markdown('<div class="section-header"><h3>🔬 Advanced Analysis</h3></div>',
@@ -825,6 +840,142 @@ def _render_results(results: dict, sr: int, settings: dict) -> None:
 
     with tab_about:
         _render_stft_explainer()
+
+
+# ---------------------------------------------------------------------------
+# Piano Arrangement Section
+# ---------------------------------------------------------------------------
+
+def _render_piano_section(
+    results: dict,
+    is_residual: bool,
+    mode_label: str,
+    sr: int,
+) -> None:
+    """
+    Render the Instrumental → Piano arrangement converter section.
+
+    Transcribes polyphonic musical content from the instrumental track (melody,
+    harmony, chords, rhythm) into MIDI and synthesizes it using a piano SoundFont.
+    """
+    st.markdown(
+        '<div class="section-header"><h3>🎹 Instrumental → Piano Version</h3></div>',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Transcribe the musical content (melody, chords, rhythm) of the instrumental "
+        "and generate a piano-only arrangement using SoundFont synthesis."
+    )
+
+    instr_audio = results["instr_residual"] if is_residual else results["instr_additive"]
+    instr_bytes = results["instr_res_bytes"] if is_residual else results["instr_add_bytes"]
+
+    # Calculate audio duration
+    duration_sec = len(instr_audio) / sr if instr_audio.ndim == 1 else instr_audio.shape[-1] / sr
+
+    # Cache key for session state persistence
+    cache_key = f"piano_result_{len(instr_audio)}_{is_residual}_{sr}"
+    piano_data = st.session_state.get(cache_key)
+
+    col_btn, col_info = st.columns([1, 2])
+    with col_btn:
+        convert_btn = st.button(
+            "🎹 Convert Instrumental to Piano",
+            type="primary" if piano_data is None else "secondary",
+            use_container_width=True,
+            help="Transcribes the instrumental to musical notes and renders a piano version.",
+        )
+    with col_info:
+        if piano_data is None:
+            st.caption("ℹ️ Generates an actual piano rendition (not EQ filtering or stem isolation).")
+        else:
+            st.caption(
+                f"✅ Piano version ready: **{piano_data['note_count']} notes** "
+                f"({piano_data['elapsed_time']:.1f}s processing time)"
+            )
+
+    if convert_btn:
+        if duration_sec > LARGE_FILE_WARNING_SECONDS:
+            st.warning(
+                f"⚠️ Audio duration is {format_duration(duration_sec)}. "
+                "Transcription and SoundFont synthesis may take 10–30 seconds."
+            )
+
+        with st.status("🎹 Generating piano arrangement...", expanded=True) as p_status:
+            try:
+                p_status.write("🔍 Loading transcription & synthesis engine...")
+                converter = get_piano_converter()
+
+                p_status.write("🎼 Performing polyphonic note & chord transcription (CQT + onset detection)...")
+                res = converter.convert(instr_audio, sample_rate=sr)
+
+                p_status.write(f"🎹 Synthesizing {res.note_count} notes with FluidSynth piano sampler...")
+                piano_bytes = audio_to_bytes(res.audio, sample_rate=res.sample_rate)
+
+                piano_data = {
+                    "audio": res.audio,
+                    "bytes": piano_bytes,
+                    "note_count": res.note_count,
+                    "duration": res.duration,
+                    "elapsed_time": res.elapsed_time,
+                    "note_events": res.note_events,
+                    "sr": res.sample_rate,
+                }
+                st.session_state[cache_key] = piano_data
+                p_status.update(
+                    label=f"✅ Piano arrangement generated ({res.note_count} notes, {res.elapsed_time:.1f}s)!",
+                    state="complete",
+                )
+            except PianoConversionError as e:
+                st.error(f"❌ Piano conversion failed: {e}")
+                logger.exception("Piano conversion failed")
+                return
+            except Exception as e:
+                st.error(f"❌ An unexpected error occurred during piano conversion: {e}")
+                logger.exception("Unexpected error during piano conversion")
+                return
+
+    if piano_data:
+        st.markdown("#### 🎧 Piano Version Preview & Download")
+        col_orig, col_piano = st.columns(2)
+
+        with col_orig:
+            st.markdown(f"**🎸 Original Instrumental ({mode_label})**")
+            st.audio(instr_bytes, format="audio/wav")
+
+        with col_piano:
+            st.markdown("**🎹 Piano Rendition**")
+            st.audio(piano_data["bytes"], format="audio/wav")
+            st.download_button(
+                label="⬇️ Download Piano Version (WAV)",
+                data=piano_data["bytes"],
+                file_name="instrumental_piano_rendition.wav",
+                mime="audio/wav",
+                use_container_width=True,
+                key=f"dl_piano_{cache_key}",
+            )
+
+        # Waveform Comparison
+        with st.expander("📊 Waveform Comparison (Instrumental vs Piano Rendition)", expanded=False):
+            fig = plot_comparison_waveforms(
+                {
+                    f"Instrumental ({mode_label})": instr_audio,
+                    "Piano Version": piano_data["audio"],
+                },
+                sr,
+            )
+            st.pyplot(fig)
+            plt_close(fig)
+
+        # Detected Notes Summary
+        if piano_data.get("note_events"):
+            with st.expander(f"🎼 Detected Notes Inspector ({piano_data['note_count']} notes)", expanded=False):
+                notes_sample = piano_data["note_events"][:40]
+                note_tags = [f"`{n.note_name}` ({n.start_time:.1f}s–{n.end_time:.1f}s)" for n in notes_sample]
+                summary = " • ".join(note_tags)
+                if len(piano_data["note_events"]) > 40:
+                    summary += f" • *... and {len(piano_data['note_events']) - 40} more notes*"
+                st.markdown(summary)
 
 
 # ---------------------------------------------------------------------------

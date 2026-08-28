@@ -11,10 +11,20 @@ All plots use a dark theme compatible with Streamlit's default appearance
 and are optimized for readability at typical web display sizes.
 """
 
+import re
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.figure import Figure
+
+
+def _clean_title(title: str) -> str:
+    """Remove emoji and special Unicode symbols for matplotlib font compatibility."""
+    cleaned = re.sub(r"[\U00010000-\U0010ffff]", "", title)
+    # Clean up double spaces or dangling hyphens
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
 
 # Use non-interactive backend for Streamlit
 matplotlib.use("Agg")
@@ -107,7 +117,7 @@ def plot_waveform(
 
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Amplitude")
-    ax.set_title(title, fontsize=13, fontweight="bold", pad=10)
+    ax.set_title(_clean_title(title), fontsize=13, fontweight="bold", pad=10)
     ax.set_xlim(0, duration)
     ax.set_ylim(-1.05, 1.05)
 
@@ -180,7 +190,7 @@ def plot_spectrogram(
 
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Frequency (Hz)")
-    ax.set_title(title, fontsize=13, fontweight="bold", pad=10)
+    ax.set_title(_clean_title(title), fontsize=13, fontweight="bold", pad=10)
 
     cbar = fig.colorbar(img, ax=ax, format="%+2.0f dB", pad=0.02)
     cbar.ax.tick_params(colors=COLORS["muted"], labelsize=8)
@@ -233,7 +243,7 @@ def plot_frequency_spectrum(
 
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel("Magnitude")
-    ax.set_title(title, fontsize=13, fontweight="bold", pad=10)
+    ax.set_title(_clean_title(title), fontsize=13, fontweight="bold", pad=10)
 
     fig.tight_layout()
     return fig
@@ -312,7 +322,7 @@ def plot_audio_features(
 
     axes[-1].set_xlabel("Time (s)")
 
-    fig.suptitle(title, fontsize=14, fontweight="bold",
+    fig.suptitle(_clean_title(title), fontsize=14, fontweight="bold",
                  color=COLORS["text"], y=1.01)
     fig.tight_layout()
     return fig
@@ -345,6 +355,8 @@ def plot_comparison_waveforms(
         "Original": COLORS["original"],
         "Vocals": COLORS["vocals"],
         "Instrumental": COLORS["instrumental"],
+        "Piano Version": "#FFA657",
+        "Piano": "#FFA657",
     }
 
     n = len(signals)
@@ -375,7 +387,7 @@ def plot_comparison_waveforms(
         ax.plot(time, signal, color=color, linewidth=0.3, alpha=0.85)
         ax.fill_between(time, signal, alpha=0.1, color=color)
         ax.set_ylabel("Amplitude", fontsize=9, color=COLORS["muted"])
-        ax.set_title(label, fontsize=11, fontweight="bold", pad=5, loc="left",
+        ax.set_title(_clean_title(label), fontsize=11, fontweight="bold", pad=5, loc="left",
                      color=color)
         ax.set_ylim(-1.05, 1.05)
 

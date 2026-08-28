@@ -245,6 +245,61 @@ The selected device is displayed in the sidebar.
 
 ---
 
+---
+
+## 🎹 Piano Arrangement (Instrumental → Piano)
+
+In addition to vocal and stem separation, the app includes an **Instrumental → Piano Version** converter that transforms the separated instrumental track into a piano-only arrangement.
+
+### How It Works: Transcription & Synthesis Pipeline
+
+```
+Instrumental Audio (44.1 kHz)
+         ↓
+    [1] Harmonic-Percussive Separation (HPSS)
+        (removes drum beats/transients to avoid spurious notes)
+         ↓
+    [2] Constant-Q Transform (CQT) & Onset Detection
+        (note-level logarithmic frequency analysis + event timing)
+         ↓
+    [3] Polyphonic Note Extraction & Velocity Estimation
+        (captures melodies, chords, timing, and dynamic volume)
+         ↓
+    [4] MIDI Construction (pretty_midi)
+        (assigns notes to Acoustic Grand Piano program 0)
+         ↓
+    [5] SoundFont Piano Synthesis (FluidSynth)
+        (renders realistic piano acoustics with proper attack/decay)
+         ↓
+    Piano Rendition Audio (WAV)
+```
+
+> **Note**: This is an actual **musical arrangement** created from transcribed notes and chords, *not* an EQ filter or simple stem extraction.
+
+---
+
+## 🧠 Models & Stems
+
+| Feature | 4-Stem (Default) | 6-Stem (`htdemucs_6s`) |
+|---------|------------------|------------------------|
+| **Model** | `htdemucs` | `htdemucs_6s` |
+| **Separated Stems** | Vocals, Drums, Bass, Other | Vocals, Drums, Bass, Other, **Guitar**, **Piano** |
+| **Instrumental Modes** | Residual (`Mix - Vocals`) & Additive | Residual & Additive |
+| **Piano Version** | Built-in (CQT + FluidSynth) | Built-in (CQT + FluidSynth) |
+
+---
+
+## 💻 System Dependencies
+
+- **FFmpeg**: Required for MP3, M4A, AAC, and non-WAV format conversion
+  - macOS: `brew install ffmpeg`
+  - Ubuntu/Debian: `sudo apt install ffmpeg`
+- **FluidSynth**: Required for high-quality SoundFont piano synthesis
+  - macOS: `brew install fluid-synth`
+  - Ubuntu/Debian: `sudo apt install fluidsynth`
+
+---
+
 ## 📁 Project Structure
 
 ```
@@ -256,9 +311,10 @@ MusicVocals/
 ├── src/
 │   ├── __init__.py
 │   ├── audio.py              # Audio I/O, validation, preprocessing
-│   ├── separator.py          # Source separation (Demucs wrapper)
+│   ├── separator.py          # Source separation (Demucs 4-stem / 6-stem)
+│   ├── piano.py              # Instrumental → Piano arrangement & synthesis
 │   ├── dsp.py                # FFT, STFT, spectral features
-│   ├── visualization.py      # Matplotlib plotting functions
+│   ├── visualization.py      # Matplotlib plotting & theme functions
 │   └── utils.py              # Config, helpers, file utilities
 ├── outputs/
 │   └── .gitkeep
@@ -266,7 +322,8 @@ MusicVocals/
     ├── __init__.py
     ├── test_audio.py          # Audio loading/saving tests
     ├── test_dsp.py            # FFT/STFT/feature tests
-    └── test_separator.py      # Separator initialization tests
+    ├── test_separator.py      # Demucs separator tests
+    └── test_piano.py          # Piano transcription & synthesis tests
 ```
 
 ---

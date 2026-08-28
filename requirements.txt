@@ -23,3 +23,7 @@ matplotlib>=3.10
 
 # Testing
 pytest>=8.0
+
+# Piano arrangement synthesis
+pretty_midi>=0.2.10
+pyfluidsynth>=1.3
