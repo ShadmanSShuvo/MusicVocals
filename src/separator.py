@@ -158,7 +158,11 @@ class DemucsSeparator(SeparatorBase):
 
         Args:
             model_name: Name of the Demucs model to use.
-                        Options: 'htdemucs', 'htdemucs_ft', 'mdx_extra'
+                        Options:
+                          'htdemucs'    — 4 stems: vocals, drums, bass, other
+                          'htdemucs_6s' — 6 stems: vocals, drums, bass, other, guitar, piano
+                          'htdemucs_ft' — Fine-tuned 4-stem variant
+                          'mdx_extra'   — MDX-Net extra quality 4-stem
             device: Processing device. Auto-detected if None.
         """
         self.model_name = model_name
@@ -250,10 +254,12 @@ class DemucsSeparator(SeparatorBase):
             - 'vocals': Vocal track, shape (channels, samples)
             - 'instrumental': Instrumental track according to instrumental_mode
             - 'instrumental_residual': Lossless residual track (mix - vocals)
-            - 'instrumental_additive': Stem sum track (drums + bass + other)
+            - 'instrumental_additive': Stem sum track (drums + bass + other [+ guitar + piano])
             - 'drums': Isolated drum stem
             - 'bass': Isolated bass stem
             - 'other': Isolated other instruments stem
+            - 'guitar': (htdemucs_6s only) Isolated guitar stem
+            - 'piano': (htdemucs_6s only) Isolated piano stem
         """
         if not self.is_loaded:
             raise RuntimeError("Model not loaded. Call load_model() first.")
@@ -346,8 +352,9 @@ class DemucsSeparator(SeparatorBase):
             "instrumental_additive": instrumental_additive,
         }
 
-        # Include individual stems if available
-        for name in ["drums", "bass", "other"]:
+        # Include all individual stems that the model produced
+        # (4-stem: drums, bass, other) | (6-stem: drums, bass, other, guitar, piano)
+        for name in ["drums", "bass", "other", "guitar", "piano"]:
             if name in stem_dict:
                 result[name] = stem_dict[name]
 
