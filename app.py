@@ -873,8 +873,41 @@ def _render_piano_section(
     # Calculate audio duration
     duration_sec = len(instr_audio) / sr if instr_audio.ndim == 1 else instr_audio.shape[-1] / sr
 
+    # Piano style & processing controls
+    col_style, col_filter = st.columns([2, 1])
+    with col_style:
+        style_choice = st.selectbox(
+            "Piano Sound Style",
+            [
+                "🎹 Concert Grand Piano (Steinway D — Full & Rich)",
+                "✨ Bright Grand Piano (Yamaha C7 — Crisp & Clear)",
+                "🏛️ Honky-tonk / Upright Piano",
+                "🌙 Electric Piano (Rhodes Style — Warm & Vintage)",
+            ],
+            index=0,
+            help="Select the sampled acoustic piano instrument soundfont preset.",
+        )
+    with col_filter:
+        filter_drums = st.checkbox(
+            "Filter Percussion",
+            value=True,
+            help="Removes drum hits/percussion transients before transcription to produce clean piano chords.",
+        )
+
+    prog_map = {
+        "Concert": 0,
+        "Bright": 1,
+        "Honky-tonk": 3,
+        "Electric": 4,
+    }
+    chosen_program = 0
+    for k, v in prog_map.items():
+        if k in style_choice:
+            chosen_program = v
+            break
+
     # Cache key for session state persistence
-    cache_key = f"piano_result_{len(instr_audio)}_{is_residual}_{sr}"
+    cache_key = f"piano_result_{len(instr_audio)}_{is_residual}_{sr}_{chosen_program}_{filter_drums}"
     piano_data = st.session_state.get(cache_key)
 
     col_btn, col_info = st.columns([1, 2])
@@ -883,14 +916,15 @@ def _render_piano_section(
             "🎹 Convert Instrumental to Piano",
             type="primary" if piano_data is None else "secondary",
             use_container_width=True,
-            help="Transcribes the instrumental to musical notes and renders a piano version.",
+            help="Transcribes the instrumental to musical notes and renders an authentic piano arrangement.",
         )
     with col_info:
         if piano_data is None:
-            st.caption("ℹ️ Generates an actual piano rendition (not EQ filtering or stem isolation).")
+            st.caption("ℹ️ Powered by ByteDance MAESTRO Neural Transcription & Steinway SoundFont Sampler.")
         else:
             st.caption(
-                f"✅ Piano version ready: **{piano_data['note_count']} notes** "
+                f"✅ Piano version ready: **{piano_data['note_count']} notes** • "
+                f"*{piano_data.get('program_name', 'Acoustic Grand Piano')}* "
                 f"({piano_data['elapsed_time']:.1f}s processing time)"
             )
 
@@ -901,15 +935,20 @@ def _render_piano_section(
                 "Transcription and SoundFont synthesis may take 10–30 seconds."
             )
 
-        with st.status("🎹 Generating piano arrangement...", expanded=True) as p_status:
+        with st.status("🎹 Generating authentic piano arrangement...", expanded=True) as p_status:
             try:
-                p_status.write("🔍 Loading transcription & synthesis engine...")
+                p_status.write("🔍 Loading neural transcription & SoundFont synthesis engine...")
                 converter = get_piano_converter()
 
-                p_status.write("🎼 Performing polyphonic note & chord transcription (CQT + onset detection)...")
-                res = converter.convert(instr_audio, sample_rate=sr)
+                p_status.write("🎼 Performing high-resolution polyphonic note transcription (ByteDance MAESTRO CRNN)...")
+                res = converter.convert(
+                    instr_audio,
+                    sample_rate=sr,
+                    program=chosen_program,
+                    filter_drums=filter_drums,
+                )
 
-                p_status.write(f"🎹 Synthesizing {res.note_count} notes with FluidSynth piano sampler...")
+                p_status.write(f"🎹 Synthesizing {res.note_count} notes with Steinway Concert Grand SoundFont...")
                 piano_bytes = audio_to_bytes(res.audio, sample_rate=res.sample_rate)
 
                 piano_data = {
@@ -918,6 +957,7 @@ def _render_piano_section(
                     "note_count": res.note_count,
                     "duration": res.duration,
                     "elapsed_time": res.elapsed_time,
+                    "program_name": res.program_name,
                     "note_events": res.note_events,
                     "sr": res.sample_rate,
                 }

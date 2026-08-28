@@ -24,6 +24,9 @@ matplotlib>=3.10
 # Testing
 pytest>=8.0
 
-# Piano arrangement synthesis
+# Piano arrangement synthesis & neural transcription
 pretty_midi>=0.2.10
 pyfluidsynth>=1.3
+piano_transcription_inference>=0.0.6
+torchlibrosa>=0.1.0
+audioread>=3.0
