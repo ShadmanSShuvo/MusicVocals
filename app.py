@@ -149,14 +149,15 @@ st.markdown("""
 # ---------------------------------------------------------------------------
 
 @st.cache_resource(show_spinner=False)
-def get_separator() -> DemucsSeparator:
+def get_separator(model_name: str = "htdemucs") -> DemucsSeparator:
     """
     Load and cache the Demucs separator model.
 
     Uses Streamlit's @cache_resource so the model is loaded once
-    and reused across all sessions and reruns.
+    and reused across all sessions and reruns. Each unique model_name
+    gets its own cached instance.
     """
-    separator = DemucsSeparator(model_name="htdemucs")
+    separator = DemucsSeparator(model_name=model_name)
     separator.load_model()
     return separator
 
@@ -230,13 +231,34 @@ def render_sidebar() -> dict[str, Any]:
 
         st.markdown("---")
 
+        # --- Stem Model Selector ---
+        st.markdown("### 🎸 Stem Model")
+        model_choice = st.radio(
+            "Separation Model",
+            [
+                "🎵 4-Stem (htdemucs) — Faster",
+                "🎸 6-Stem (htdemucs_6s) — Guitar + Piano",
+            ],
+            index=0,
+            help=(
+                "4-Stem separates: Vocals, Drums, Bass, Other.\n"
+                "6-Stem additionally isolates Guitar and Piano — takes longer to load "
+                "on first run (separate model weights download)."
+            ),
+        )
+        model_name = "htdemucs_6s" if "6-Stem" in model_choice else "htdemucs"
+
+        st.markdown("---")
+
         st.markdown("### 🧠 Model Info")
         device = select_device()
         device_emoji = {"cuda": "🟢", "mps": "🟡", "cpu": "🔵"}.get(str(device), "⚪")
+        stems_label = "Vocals, Drums, Bass, Other, Guitar, Piano" if model_name == "htdemucs_6s" else "Vocals, Drums, Bass, Other"
+        model_display = "htdemucs_6s" if model_name == "htdemucs_6s" else "htdemucs"
         st.markdown(f"""
-        - **Model**: Demucs v4 (htdemucs)
+        - **Model**: Demucs v4 ({model_display})
         - **Architecture**: Hybrid Transformer
-        - **Stems**: Vocals, Drums, Bass, Other
+        - **Stems**: {stems_label}
         - **Sample Rate**: 44.1 kHz
         - {device_emoji} **Device**: `{device}`
         """)
@@ -259,6 +281,7 @@ def render_sidebar() -> dict[str, Any]:
         "shifts": shifts,
         "overlap": overlap,
         "mode": mode_str,
+        "model_name": model_name,
     }
 
 
@@ -406,7 +429,7 @@ def main() -> None:
         progress.progress(10, text="Loading AI model...")
 
         try:
-            separator = get_separator()
+            separator = get_separator(settings["model_name"])
         except Exception as e:
             st.error(f"❌ Failed to load the separation model: {e}")
             progress.empty()
@@ -493,9 +516,10 @@ def main() -> None:
         instr_res_freqs, instr_res_mags = compute_fft(instr_res_mono, 44100)
         instr_add_freqs, instr_add_mags = compute_fft(instr_add_mono, 44100)
 
-        # Build 4-stems dictionary for stem inspection
+        # Build stems dictionary for the Stem Inspector
+        # Includes base stems (drums, bass, other) and extended 6-stem ones (guitar, piano)
         stems_dict_processed = {}
-        for stem_name in ["drums", "bass", "other"]:
+        for stem_name in ["drums", "bass", "other", "guitar", "piano"]:
             if stem_name in stems:
                 stem_audio = stems[stem_name]
                 stems_dict_processed[stem_name] = {
@@ -690,24 +714,49 @@ def _render_results(results: dict, sr: int, settings: dict) -> None:
             st.pyplot(fig)
             plt_close(fig)
 
-    # --- 4-Stem Explorer Section ---
+    # --- Stem Inspector Section ---
     if results.get("stems"):
-        st.markdown('<div class="section-header"><h3>🥁 Isolated 4-Stem Inspector</h3></div>',
-                    unsafe_allow_html=True)
-        st.caption("Inspect and download individual constituent stems separated by Demucs v4:")
-
-        stem_cols = st.columns(3)
-        stem_configs = [
-            ("drums", "🥁 Drums", "#58A6FF"),
-            ("bass", "🎸 Bass", "#BC8CFF"),
-            ("other", "🎹 Other Instruments", "#39D353"),
+        available_stems = [
+            k for k in ["drums", "bass", "other", "guitar", "piano"]
+            if k in results["stems"]
         ]
+        stem_count = len(available_stems)
+        inspector_title = (
+            f"🥁 Isolated {stem_count}-Stem Inspector"
+            if stem_count != 4
+            else "🥁 Isolated 4-Stem Inspector"
+        )
+        st.markdown(
+            f'<div class="section-header"><h3>{inspector_title}</h3></div>',
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "Inspect and download each constituent stem separated by Demucs. "
+            + ("Guitar and Piano are isolated using the htdemucs_6s model."
+               if stem_count > 4 else "")
+        )
 
-        for idx, (stem_key, stem_title, stem_color) in enumerate(stem_configs):
-            if stem_key in results["stems"]:
+        # Stem metadata: key -> (label, waveform color)
+        STEM_META: dict[str, tuple[str, str]] = {
+            "drums":  ("🥁 Drums",             "#58A6FF"),
+            "bass":   ("🎸 Bass",              "#BC8CFF"),
+            "other":  ("🎹 Other Instruments",  "#39D353"),
+            "guitar": ("🎸 Guitar",            "#FFA657"),
+            "piano":  ("🎹 Piano",             "#FF7B72"),
+        }
+
+        # Lay stems in rows of 3
+        ROW_SIZE = 3
+        for row_start in range(0, len(available_stems), ROW_SIZE):
+            row_keys = available_stems[row_start : row_start + ROW_SIZE]
+            cols = st.columns(len(row_keys))
+            for col, stem_key in zip(cols, row_keys):
+                if stem_key not in results["stems"]:
+                    continue
                 stem_data = results["stems"][stem_key]
-                with stem_cols[idx]:
-                    st.markdown(f"**{stem_title}**")
+                label, color = STEM_META.get(stem_key, (stem_key.capitalize(), "#CCCCCC"))
+                with col:
+                    st.markdown(f"**{label}**")
                     st.audio(stem_data["bytes"], format="audio/wav")
                     st.download_button(
                         label=f"⬇️ Download {stem_key.capitalize()} (WAV)",
@@ -715,12 +764,13 @@ def _render_results(results: dict, sr: int, settings: dict) -> None:
                         file_name=f"{stem_key}.wav",
                         mime="audio/wav",
                         use_container_width=True,
+                        key=f"dl_{stem_key}",
                     )
-                    with st.expander(f"{stem_key.capitalize()} Waveform", expanded=False):
+                    with st.expander(f"{label} Waveform", expanded=False):
                         fig = plot_waveform(
                             stem_data["mono"], results["sr"],
-                            title=f"{stem_key.capitalize()} — Waveform",
-                            color=stem_color,
+                            title=f"{label} — Waveform",
+                            color=color,
                         )
                         st.pyplot(fig)
                         plt_close(fig)
